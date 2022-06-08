@@ -11,7 +11,6 @@ import android.view.View
 import android.widget.Toast
 import androidx.appcompat.widget.Toolbar
 import androidx.recyclerview.widget.RecyclerView
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import butterknife.BindView
 import butterknife.OnClick
 import com.huanchengfly.tieba.post.R
@@ -20,10 +19,12 @@ import com.huanchengfly.tieba.post.api.TiebaApi
 import com.huanchengfly.tieba.post.api.models.SubFloorListBean
 import com.huanchengfly.tieba.post.components.MyLinearLayoutManager
 import com.huanchengfly.tieba.post.components.dividers.ThreadDivider
+import com.huanchengfly.tieba.post.goToActivity
 import com.huanchengfly.tieba.post.models.ReplyInfoBean
 import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.NavigationHelper
 import com.huanchengfly.tieba.post.utils.ThemeUtil
+import com.scwang.smart.refresh.layout.SmartRefreshLayout
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
@@ -31,8 +32,10 @@ import retrofit2.Response
 class FloorActivity : BaseActivity() {
     @BindView(R.id.toolbar)
     lateinit var toolbar: Toolbar
-    @BindView(R.id.floor_refresh_view)
-    lateinit var refreshLayout: SwipeRefreshLayout
+
+    @BindView(R.id.refresh_layout)
+    lateinit var refreshLayout: SmartRefreshLayout
+
     @BindView(R.id.floor_recycler_view)
     lateinit var recyclerView: RecyclerView
     private var dataBean: SubFloorListBean? = null
@@ -49,7 +52,7 @@ class FloorActivity : BaseActivity() {
             if (action != null && action == ThreadActivity.ACTION_REPLY_SUCCESS) {
                 val pid = intent.getStringExtra("pid")
                 if (pid == this@FloorActivity.pid) {
-                    refresh()
+                    refreshLayout.autoRefresh()
                 }
             }
         }
@@ -90,10 +93,7 @@ class FloorActivity : BaseActivity() {
         when (item.itemId) {
             R.id.menu_to_thread -> {
                 if (dataBean != null) {
-                    navigationHelper!!.navigationByData(NavigationHelper.ACTION_THREAD, mapOf<String, String>(
-                            "tid" to tid!!,
-                            "pid" to pid!!
-                    ))
+                    ThreadActivity.launch(this, tid!!, pid!!)
                 }
                 return true
             }
@@ -103,12 +103,12 @@ class FloorActivity : BaseActivity() {
 
     private fun initData() {
         val intent = intent
-        tid = intent.getStringExtra("tid")
-        pid = intent.getStringExtra("pid")
-        spid = intent.getStringExtra("spid")
+        tid = intent.getStringExtra(EXTRA_THREAD_ID)
+        pid = intent.getStringExtra(EXTRA_POST_ID)
+        spid = intent.getStringExtra(EXTRA_SUB_POST_ID)
         if (tid != null && (pid != null || spid != null)) {
             hasMore = true
-            refresh()
+            refreshLayout.autoRefresh()
         }
     }
 
@@ -116,26 +116,15 @@ class FloorActivity : BaseActivity() {
         setSupportActionBar(toolbar)
         supportActionBar?.setTitle(R.string.title_floor)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        recyclerViewAdapter = RecyclerFloorAdapter(this).apply {
-            openAutoLoadMore()
-            setLoadingView(R.layout.layout_footer_loading)
-            setLoadEndView(R.layout.layout_footer_loadend)
-            setLoadFailedView(R.layout.layout_footer_load_failed)
-            setOnLoadMoreListener { isReload: Boolean ->
-                if (isReload) {
-                    refresh()
-                } else {
-                    loadMore()
-                }
-            }
-        }
+        recyclerViewAdapter = RecyclerFloorAdapter(this)
         recyclerView.apply {
             layoutManager = MyLinearLayoutManager(this@FloorActivity)
             adapter = recyclerViewAdapter
             addItemDecoration(ThreadDivider(this@FloorActivity))
         }
         refreshLayout.apply {
-            ThemeUtil.setThemeForSwipeRefreshLayout(this)
+            ThemeUtil.setThemeForSmartRefreshLayout(this)
+            setOnLoadMoreListener { loadMore() }
             setOnRefreshListener { refresh() }
         }
     }
@@ -160,14 +149,15 @@ class FloorActivity : BaseActivity() {
     }
 
     private fun refresh() {
-        refreshLayout.isRefreshing = true
+        if (tid == null) {
+            return
+        }
         TiebaApi.getInstance()
                 .floor(tid!!, pn, pid, spid)
                 .enqueue(object : Callback<SubFloorListBean> {
                     override fun onFailure(call: Call<SubFloorListBean>, t: Throwable) {
                         Toast.makeText(this@FloorActivity, t.message, Toast.LENGTH_SHORT).show()
-                        recyclerViewAdapter!!.loadFailed()
-                        refreshLayout.isRefreshing = false
+                        refreshLayout.finishRefresh(false)
                     }
 
                     override fun onResponse(call: Call<SubFloorListBean>, response: Response<SubFloorListBean>) {
@@ -177,11 +167,11 @@ class FloorActivity : BaseActivity() {
                         pid = subFloorListBean.post!!.id
                         spid = null
                         hasMore = subFloorListBean.page!!.currentPage.toInt() < subFloorListBean.page.totalPage.toInt()
+                        refreshLayout.finishRefresh()
                         if (!hasMore) {
-                            recyclerViewAdapter!!.loadEnd()
+                            refreshLayout.setNoMoreData(true)
                         }
                         toolbar.title = getString(R.string.title_floor_loaded, subFloorListBean.post.floor)
-                        refreshLayout.isRefreshing = false
                     }
                 })
     }
@@ -192,7 +182,7 @@ class FloorActivity : BaseActivity() {
                 .floor(tid!!, pn, pid, spid)
                 .enqueue(object : Callback<SubFloorListBean> {
                     override fun onFailure(call: Call<SubFloorListBean>, t: Throwable) {
-                        recyclerViewAdapter!!.loadFailed()
+                        refreshLayout.finishLoadMore(false)
                     }
 
                     override fun onResponse(call: Call<SubFloorListBean>, response: Response<SubFloorListBean>) {
@@ -202,11 +192,36 @@ class FloorActivity : BaseActivity() {
                         pid = subFloorListBean.post!!.id
                         spid = null
                         hasMore = subFloorListBean.page!!.currentPage.toInt() < subFloorListBean.page.totalPage.toInt()
+                        refreshLayout.finishLoadMore()
                         if (!hasMore) {
-                            recyclerViewAdapter!!.loadEnd()
+                            refreshLayout.setNoMoreData(true)
                         }
                         pn += 1
                     }
                 })
+    }
+
+    companion object {
+        const val EXTRA_THREAD_ID = "tid"
+        const val EXTRA_POST_ID = "pid"
+        const val EXTRA_SUB_POST_ID = "spid"
+
+        @JvmStatic
+        @JvmOverloads
+        fun launch(
+                context: Context,
+                threadId: String,
+                postId: String? = null,
+                subPostId: String? = null
+        ) {
+            if (postId == null && subPostId == null) {
+                throw IllegalArgumentException()
+            }
+            context.goToActivity<FloorActivity> {
+                putExtra(EXTRA_THREAD_ID, threadId)
+                putExtra(EXTRA_POST_ID, postId)
+                putExtra(EXTRA_SUB_POST_ID, subPostId)
+            }
+        }
     }
 }
